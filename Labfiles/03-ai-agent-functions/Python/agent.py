@@ -5,6 +5,11 @@ from pathlib import Path
 
 
 # Add references
+from azure.identity import DefaultAzureCredential
+from azure.ai.agents import AgentsClient
+from azure.ai.agents.models import FunctionTool, ToolSet, ListSortOrder, MessageRole
+from user_functions import user_functions
+
 
 def main(): 
 
@@ -18,13 +23,43 @@ def main():
 
 
     # Connect to the Agent client
-    
+    agent_client = AgentsClient(
+        endpoint=project_endpoint,
+        credential = DefaultAzureCredential(
+            credential=DefaultAzureCredential(
+                exclude_environment_credential=True,
+                exclude_managed_identity_credential=True
+            )
+        )
+    )
 
 
     # Define an agent that can use the custom functions
+    with agent_client:
 
+        functions = FunctionTool(user_functions)
+        toolset = ToolSet()
+        toolset.add(functions)
+        agent_client.enable_auto_function_calls(toolset)
 
-    
+        # You are a technical support agent.
+        # When a user has a technical issue, you get their email address and a description of the issue.
+        # Then you use those values to submit a support ticket using the function available to you.
+        # If a file is saved, tell the user the file name.        
+        agent = agent_client.create_agent(
+            model=model_deployment,
+            name="support-agent",
+            instructions="""你是一個技術支援代理程式。當使用者遇到技術問題時，
+            你會取得他們的電子郵件地址(email address)和問題描述(Description)。
+            然後，你會透過可用的函式使用這些值來提交支援工單(support ticket)。
+            如果有檔案被儲存，請告知使用者檔案名稱。
+            """,
+            toolset=toolset
+        )
+        
+        thread = agent_client.threads.create()
+        print(f"You're chatting with: {agent.name} {agent.id}")
+
         # Loop until the user types 'quit'
         while True:
             # Get input text
@@ -36,19 +71,44 @@ def main():
                 continue
 
             # Send a prompt to the agent
-
+            message = agent_client.messages.create(
+                thread_id=thread.id,
+                role="user",
+                content=user_prompt
+            )
+    
+            run = agent_client.runs.create_and_process(
+                thread_id=thread.id,
+                agent_id=agent.id
+            )
 
             # Check the run status for failures
-
+            if run.status == "failed":
+                print(f"Run failed:{run.last_error}")
                 
             # Show the latest response from the agent
-
+            last_msg = agent_client.messages.get_last_message_text_by_role(
+                thread_id=thread.id,
+                role=MessageRole.AGENT
+            )
+            if last_msg:
+                print(f"Last Message: {last_msg.text.value}")
 
         # Get the conversation history
-
+        print("\nConversation Log:\n")
+        messages = agent_client.messages.list(
+            thread_id=thread.id,
+            order=ListSortOrder.ASCENDING
+        )
+        for message in messages:
+            if message.text_messages:
+                last_msg = message.text_messages[-1]
+                print(f"{message.role}: {last_msg.text.value}\n")
 
         # Clean up
-
+        agent_client.threads.delete(thread_id=thread.id)
+        agent_client.delete_agent(agent_id=agent.id)
+        print("Deleted agent")
     
 
 
